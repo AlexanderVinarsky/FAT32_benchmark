@@ -1,29 +1,38 @@
-#include <dtime.h>
+#include "dtime.h"
+#include <time.h>
 
-unsigned short DTM_current_time() {
-    time_t now = time(NULL);
-    struct tm tmv;
-    localtime_r(&now, &tmv);
-
-    unsigned short hour = (unsigned short)(tmv.tm_hour & 0x1F);
-    unsigned short min  = (unsigned short)(tmv.tm_min  & 0x3F);
-    unsigned short sec2 = (unsigned short)((tmv.tm_sec / 2) & 0x1F);
-
-    return (unsigned short)((hour << 11) | (min << 5) | sec2);
+static void dtm_localtime(time_t t, struct tm* out) {
+#ifdef _WIN32
+    localtime_s(out, &t);
+#else
+    localtime_r(&t, out);
+#endif
 }
 
-unsigned short DTM_current_date() {
+uint16_t DTM_current_time(void) {
     time_t now = time(NULL);
     struct tm tmv;
-    localtime_r(&now, &tmv);
+    dtm_localtime(now, &tmv);
+
+    uint16_t hour = (uint16_t)(tmv.tm_hour & 0x1F);
+    uint16_t min  = (uint16_t)(tmv.tm_min  & 0x3F);
+    uint16_t sec2 = (uint16_t)((tmv.tm_sec / 2) & 0x1F);
+
+    return (uint16_t)((hour << 11) | (min << 5) | sec2);
+}
+
+uint16_t DTM_current_date(void) {
+    time_t now = time(NULL);
+    struct tm tmv;
+    dtm_localtime(now, &tmv);
 
     int year = tmv.tm_year + 1900;
     if (year < 1980) year = 1980;
     if (year > 2107) year = 2107;
 
-    unsigned short y = (unsigned short)((year - 1980) & 0x7F);
-    unsigned short m = (unsigned short)((tmv.tm_mon + 1) & 0x0F);
-    unsigned short d = (unsigned short)(tmv.tm_mday & 0x1F);
+    uint16_t y = (uint16_t)((year - 1980) & 0x7F);
+    uint16_t m = (uint16_t)((tmv.tm_mon + 1) & 0x0F);
+    uint16_t d = (uint16_t)(tmv.tm_mday & 0x1F);
 
-    return (unsigned short)((y << 9) | (m << 5) | d);
+    return (uint16_t)((y << 9) | (m << 5) | d);
 }

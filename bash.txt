@@ -1,0 +1,27 @@
+rm -f bench.bin
+
+gcc -std=c11 -O0 -g -Wall -Wextra \
+  -D_FILE_OFFSET_BITS=64 -D_POSIX_C_SOURCE=200809L -D_XOPEN_SOURCE=700 \
+  -fsanitize=address,undefined -fno-omit-frame-pointer \
+  -Iinclude main.c src/*.c -o bench.bin
+
+
+
+
+
+
+
+  python3 fat_builder.py --size 64MiB --output image.img --init-root-dir
+
+
+
+
+
+
+
+
+
+
+
+ASAN_OPTIONS=detect_leaks=0 ./bench.bin 10 image.img
+echo "exit=$?"

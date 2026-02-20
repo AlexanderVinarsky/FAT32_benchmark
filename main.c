@@ -1,12 +1,12 @@
-﻿// #define _POSIX_C_SOURCE 200809L
+﻿#define _POSIX_C_SOURCE 200809L
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <stdint.h>
 #include <time.h>
-#include <disk.h>
-#include <fat.h>
+#include "disk.h"
+#include "fat.h"
 
 typedef struct {
     uint64_t total_us;
@@ -116,8 +116,9 @@ int main(int argc, char** argv) {
     }
 
     int count = atoi(argv[1]);
-    if (!DSK_host_open(argv[2])) {
-        fprintf(stderr, "DSK_host_open(disk.img) failed\n");
+
+    if (DSK_host_open(argv[2]) != 0) {
+        fprintf(stderr, "DSK_host_open(%s) failed\n", argv[2]);
         return 1;
     }
 

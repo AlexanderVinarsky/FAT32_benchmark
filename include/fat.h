@@ -1,18 +1,16 @@
 #ifndef FAT_H_
 #define FAT_H_
 
-#include <disk.h>
+#include "disk.h"
+#include "fslib.h"
+#include "compat.h"
+#include "dtime.h"
 #include <stddef.h>
 #include <string.h>
 #include <stdlib.h>
-#include <fslib.h>
 #include <ctype.h>
 #include <stdint.h>
 #include <stdio.h>
-#include <compat.h>
-#include <dtime.h>
-
-#define SECTOR_OFFSET			23000
 
 #define END_CLUSTER_32      	0x0FFFFFF8
 #define BAD_CLUSTER_32      	0x0FFFFFF7
@@ -123,6 +121,7 @@ typedef struct fat_data {
 	unsigned int sectors_per_cluster;
 	unsigned int ext_root_cluster;
 	unsigned int first_fat_sector;
+	unsigned int table_count;
 } fat_data_t;
 
 typedef struct directory_entry {
