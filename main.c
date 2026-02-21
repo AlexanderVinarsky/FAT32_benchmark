@@ -5,293 +5,143 @@
 #include <string.h>
 #include <stdint.h>
 #include <time.h>
+
 #include "disk.h"
 #include "fat.h"
 
-typedef struct {
-    uint64_t total_us;
-    uint64_t count;
-    uint64_t min_us;
-    uint64_t max_us;
-} timer_us_t;
-
-static uint64_t now_us() {
+static uint64_t now_us(void) {
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
     return (uint64_t)ts.tv_sec * 1000000ull + (uint64_t)ts.tv_nsec / 1000ull;
 }
 
-static void tadd(timer_us_t* t, uint64_t us) {
-    t->total_us += us;
-    t->count++;
-    if (t->count == 1) { t->min_us = us; t->max_us = us; }
-    else { if (us < t->min_us) t->min_us = us; if (us > t->max_us) t->max_us = us; }
+#define MEASURE_US(expr) ({ uint64_t _a = now_us(); expr; uint64_t _b = now_us(); (_b - _a); })
+
+static void make_name(char* out, size_t n, unsigned int i) {
+    snprintf(out, n, "f%07u", i);
 }
 
-static double tavg(const timer_us_t* t) {
-    return (t->count == 0) ? 0.0 : (double)t->total_us / (double)t->count;
-}
-
-#define MEASURE_US(code) ({ uint64_t _a = now_us(); code; uint64_t _b = now_us(); (_b - _a); })
-
-typedef struct {
-    char  val1[128];
-    char  val2;
-    short val3;
-    int   val4;
-    long  val5;
-} __attribute__((packed)) test_val_t;
-
-static char* filenames[] = {
-    "root/test.txt",   "root/tdir/asd.bin", "root/dir/dir2/dir3/123.dr", "root/terrr/terrr",
-    "root/test1.txt",  "root/test2.txt",    "root/asd",                  "root/rt/fr/or/qwe/df/wd/lf/ls/ge/w/e/r/t/y/u/i/file.txt",
-    "root/test_1.txt", "root/test_2.txt",   "root/test_3.txt",           "root/test_4.txt", "root/test_5.txt", "root/test_6.txt",
-    "root/test_7.txt", "root/test_8.txt",   "root/test_9.txt",           "root/test_10.txt"
-};
-
-static int g_id = 1;
-static const char* get_name(char* buf12) {
-    snprintf(buf12, 12, "%06d.pg", g_id++);
-    return buf12;
-}
-
-static void norm_path(const char* in, char* out, size_t out_sz) {
-    size_t n = strlen(in);
-    if (n >= out_sz) n = out_sz - 1;
-    for (size_t i = 0; i < n; i++) out[i] = (in[i] == '/') ? '\\' : in[i];
-    out[n] = 0;
-}
-
-static void split_parent_file(const char* full, char* parent, size_t psz, char* file, size_t fsz) {
-    const char* last = strrchr(full, '\\');
-    if (!last) {
-        parent[0] = 0;
-        strncpy(file, full, fsz - 1);
-        file[fsz - 1] = 0;
-        return;
+static void fill_pattern(unsigned char* p, size_t n, uint32_t seed) {
+    for (size_t i = 0; i < n; i++) {
+        seed = seed * 1664525u + 1013904223u;
+        p[i] = (unsigned char)(seed >> 24);
     }
-
-    size_t plen = (size_t)(last - full);
-    if (plen >= psz) plen = psz - 1;
-    memcpy(parent, full, plen);
-    parent[plen] = 0;
-
-    strncpy(file, last + 1, fsz - 1);
-    file[fsz - 1] = 0;
 }
 
-static void split_name_ext(const char* fname, char* name, size_t nsz, char* ext, size_t esz) {
-    const char* dot = strrchr(fname, '.');
-    if (!dot || dot == fname) {
-        strncpy(name, fname, nsz - 1);
-        name[nsz - 1] = 0;
-        ext[0] = 0;
-        return;
+static int verify_pattern(const unsigned char* p, size_t n, uint32_t seed) {
+    for (size_t i = 0; i < n; i++) {
+        seed = seed * 1664525u + 1013904223u;
+        if (p[i] != (unsigned char)(seed >> 24)) return -1;
     }
-
-    size_t ln = (size_t)(dot - fname);
-    if (ln >= nsz) ln = nsz - 1;
-    memcpy(name, fname, ln);
-    name[ln] = 0;
-
-    strncpy(ext, dot + 1, esz - 1);
-    ext[esz - 1] = 0;
+    return 0;
 }
-
-static void join_path(char* out, size_t osz, const char* parent, const char* fname) {
-    out[0] = 0;
-    strncat(out, parent, osz - 1);
-    if (strlen(out) + 1 < osz) strncat(out, "\\", osz - 1 - strlen(out));
-    strncat(out, fname, osz - 1 - strlen(out));
-}
-
-// timers
-static timer_us_t open_t, create_t, write_t, read_t, rename_t, copy_t, delete_t;
 
 int main(int argc, char** argv) {
-#ifndef NO_CREATION
-    if (argc < 3) {
-        fprintf(stderr, "Usage: %s <count> <img_path>\n", argv[0]);
+    if (argc < 4) {
+        fprintf(stderr, "Usage: %s <N_files> <rw_mb> <img>\n", argv[0]);
         return 1;
     }
 
-    int count = atoi(argv[1]);
+    unsigned int N = (unsigned int)atoi(argv[1]);
+    unsigned int RW_MB = (unsigned int)atoi(argv[2]);
+    const char* img = argv[3];
+    if (!DSK_host_open(img)) return 1;
+    printf("N=%u, RW_MB=%u, img=%s\n", N, RW_MB, img);
 
-    if (DSK_host_open(argv[2]) != 0) {
-        fprintf(stderr, "DSK_host_open(%s) failed\n", argv[2]);
+    uint64_t t_init = MEASURE_US({
+        if (FAT_initialize() != 0) {
+            fprintf(stderr, "FAT_initialize failed\n");
+            exit(1);
+        }
+    });
+
+    if (!FAT_content_exists("ROOT/BENCH")) {
+        fprintf(stdout, "Creating bench directory...\n");
+
+        Content* d = FAT_create_object("BENCH", 1, "");
+        int sput_res = FAT_put_content("ROOT", d);
+        FAT_unload_content_system(d);
+
+        fprintf(stdout, "Put results: %i\n", sput_res);
+    }
+
+    if (!FAT_content_exists("ROOT/BENCH")) {
+        fprintf(stderr, "Bench directory hasn't created!\n");
         return 1;
     }
 
-    if (FAT_initialize() != 0) {
-        fprintf(stderr, "FAT_initialize() failed (is %s FAT32?)\n", argv[2]);
-        DSK_host_close();
+    uint64_t t_create = 0;
+    for (unsigned int i = 0; i < N; i++) {
+        char name[32];
+        make_name(name, sizeof(name), i);
+        t_create += MEASURE_US({
+            Content* o = FAT_create_object(name, 0, "bin");
+            FAT_put_content("ROOT/BENCH", o);
+            FAT_unload_content_system(o);
+        });
+    }
+
+    int ci = FAT_open_content("ROOT/BENCH/f0000000.bin");
+    if (ci < 0) {
+        fprintf(stderr, "Can't find a test rw file!\n");
         return 1;
     }
 
-    printf(
-        "fat_type=%u bps=%u spc=%u total_clusters=%u root_cluster=%u first_fat=%u first_data=%u fat_size=%u\n",
-        FAT_data.fat_type, FAT_data.bytes_per_sector, FAT_data.sectors_per_cluster,
-        FAT_data.total_clusters, FAT_data.ext_root_cluster,
-        FAT_data.first_fat_sector, FAT_data.first_data_sector, FAT_data.fat_size
-    );
+    const size_t chunk = 4096;
+    const size_t total_bytes = (size_t)RW_MB * 1024 * 1024;
+    unsigned char* buf = malloc(chunk);
 
-    if (FAT_content_exists("root") != 1) {
-        fprintf(stderr, "Directory 'root' not found in image. Create it in %s.\n", argv[2]);
-        DSK_host_close();
-        return 1;
+    uint64_t t_append = 0;
+    size_t off = 0;
+    uint32_t seed = 0x12345678;
+
+    while (off < total_bytes) {
+        size_t n = (total_bytes - off > chunk) ? chunk : (total_bytes - off);
+        fill_pattern(buf, n, seed);
+
+        t_append += MEASURE_US({
+            FAT_write_buffer2content(ci, buf, off, (unsigned int)n);
+        });
+
+        off += n;
     }
 
-    int handled_errors = 0;
-    int unhandled_errors = 0;
+    unsigned char* rbuf = malloc(chunk);
+    uint64_t t_read = 0;
+    off = 0;
+    seed = 0x12345678;
 
-    test_val_t data = { .val2 = 0x1A, .val3 = 0x0F34, .val4 = 0x0DEA, .val5 = 0xDEAD };
-    memset(data.val1, 0, sizeof(data.val1));
-    strncpy(data.val1, "Test data from structure! Hello there from structure, I guess..", sizeof(data.val1));
+    while (off < total_bytes) {
+        size_t n = (total_bytes - off > chunk) ? chunk : (total_bytes - off);
+        t_read += MEASURE_US({
+            FAT_read_content2buffer(ci, rbuf, off, (unsigned int)n);
+        });
 
-    unsigned char rbuf[sizeof(test_val_t)] = {0};
-    unsigned int offset = 0;
-
-    while (count-- > 0) {
-        char target[512] = {0};
-        norm_path(filenames[count % 18], target, sizeof(target));
-
-        char parent[512] = {0};
-        char fname[128] = {0};
-        split_parent_file(target, parent, sizeof(parent), fname, sizeof(fname));
-
-        char base[64] = {0};
-        char ext[16] = {0};
-        split_name_ext(fname, base, sizeof(base), ext, sizeof(ext));
-
-        int put_rc = -1;
-        tadd(&create_t, MEASURE_US({
-            Content* obj = FAT_create_object(base, 0, ext); 
-            if (!obj) { put_rc = -1; }
-            else {
-                fprintf(stderr, "[DBG] create: parent='%s' base='%s' ext='%s' full='%s'\n", parent, base, ext, target);
-                put_rc = FAT_put_content(parent, obj);
-                FAT_unload_content_system(obj);
-            }
-        }));
-
-        if (put_rc != 0) { unhandled_errors++; continue; }
-
-        int ci = -1;
-        tadd(&open_t, MEASURE_US({
-            fprintf(stderr, "[DBG] open: '%s'\n", target);
-            ci = FAT_open_content(target);
-        }));
-
-        if (ci < 0) { unhandled_errors++; continue; }
-
-        int wrc = 0;
-        tadd(&write_t, MEASURE_US({
-            wrc = FAT_write_buffer2content(ci, (const unsigned char*)&data, offset, (unsigned int)sizeof(test_val_t));
-        }));
-
-        if (wrc < 0) { FAT_close_content(ci); unhandled_errors++; continue; }
-
-        int rrc = 0;
-        tadd(&read_t, MEASURE_US({
-            memset(rbuf, 0, sizeof(rbuf));
-            rrc = FAT_read_content2buffer(ci, rbuf, offset, (unsigned int)sizeof(test_val_t));
-        }));
-
-        if (rrc != (int)sizeof(test_val_t) || memcmp(rbuf, &data, sizeof(test_val_t)) != 0) {
-            handled_errors++;
+        if (verify_pattern(rbuf, n, seed) != 0) {
+            fprintf(stderr, "verify failed at offset %zu\n", off);
+            break;
         }
 
-        char new_dot[12] = {0};
-        get_name(new_dot);
-
-        char new_fat[13] = {0};
-        strncpy(new_fat, new_dot, sizeof(new_fat) - 1);
-        _name2fatname(new_fat);
-
-        int rnm = -1;
-        tadd(&rename_t, MEASURE_US({
-            rnm = FAT_change_meta(target, new_fat);
-        }));
-
-        if (rnm != 0) { FAT_close_content(ci); unhandled_errors++; continue; }
-
-        char src_path[512] = {0};
-        join_path(src_path, sizeof(src_path), parent, new_dot);
-
-        char dst_dot[12] = {0};
-        get_name(dst_dot);
-
-        char dst_base[64] = {0};
-        char dst_ext[16] = {0};
-        split_name_ext(dst_dot, dst_base, sizeof(dst_base), dst_ext, sizeof(dst_ext));
-
-        char dst_path[512] = {0};
-        join_path(dst_path, sizeof(dst_path), parent, dst_dot);
-
-        int put2 = -1;
-        tadd(&create_t, MEASURE_US({
-            Content* dst_obj = FAT_create_object(dst_base, 0, dst_ext);
-            if (!dst_obj) put2 = -1;
-            else {
-                fprintf(stderr, "[DBG] create: parent='%s' base='%s' ext='%s' full='%s'\n", parent, base, ext, target);
-                put2 = FAT_put_content(parent, dst_obj);
-                FAT_unload_content_system(dst_obj);
-            }
-        }));
-
-        if (put2 != 0) { FAT_close_content(ci); unhandled_errors++; continue; }
-
-        int dst_ci = -1;
-        tadd(&open_t, MEASURE_US({
-            fprintf(stderr, "[DBG] open: '%s'\n", target);
-            dst_ci = FAT_open_content(dst_path);
-        }));
-
-        if (dst_ci < 0) { FAT_close_content(ci); unhandled_errors++; continue; }
-
-        tadd(&copy_t, MEASURE_US({
-            unsigned char tmp[sizeof(test_val_t)] = {0};
-            FAT_read_content2buffer(ci, tmp, offset, (unsigned int)sizeof(test_val_t));
-            FAT_write_buffer2content(dst_ci, tmp, offset, (unsigned int)sizeof(test_val_t));
-        }));
-
-        tadd(&read_t, MEASURE_US({
-            memset(rbuf, 0, sizeof(rbuf));
-            FAT_read_content2buffer(dst_ci, rbuf, offset, (unsigned int)sizeof(test_val_t));
-        }));
-        
-        if (memcmp(rbuf, &data, sizeof(test_val_t)) != 0) handled_errors++;
-
-        FAT_close_content(dst_ci);
-        FAT_close_content(ci);
-
-#ifdef DO_DELETE
-        tadd(&delete_t, MEASURE_US({
-            FAT_delete_content(dst_path);
-            FAT_delete_content(src_path);
-        }));
-#endif
+        off += n;
     }
 
-    time_t now = time(NULL);
-    char time_str[32] = {0};
-    struct tm* tm_info = localtime(&now);
-    strftime(time_str, sizeof(time_str), "%Y-%m-%d %H:%M:%S", tm_info);
-
-    fprintf(stdout, "[%s] Handled errors: %d\tUnhandled errors: %d\n", time_str, handled_errors, unhandled_errors);
-    fprintf(stdout, "Total generated names: %d\n", g_id - 1);
-
-    fprintf(stdout, "\n==== Performance Summary ====\n");
-    fprintf(stdout, "Avg open time:   %.2f us\n", tavg(&open_t));
-    fprintf(stdout, "Avg create time: %.2f us\n", tavg(&create_t));
-    fprintf(stdout, "Avg write time:  %.2f us\n", tavg(&write_t));
-    fprintf(stdout, "Avg read time:   %.2f us\n", tavg(&read_t));
-    fprintf(stdout, "Avg rename time: %.2f us\n", tavg(&rename_t));
-    fprintf(stdout, "Avg copy time:   %.2f us\n", tavg(&copy_t));
-    fprintf(stdout, "Avg delete time: %.2f us\n", tavg(&delete_t));
-    fprintf(stdout, "=============================\n\n");
-
+    FAT_close_content(ci);
+    free(buf);
+    free(rbuf);
     DSK_host_close();
-#endif
+
+    printf("\n==== FS BENCH ====\n");
+    printf("init:          %8.6f ms\n", (double)t_init / 1000.0);
+    printf("create %u:     %8.6f ms (%.2f us/op)\n", N, (double)t_create / 1000.0, (double)t_create / (double)N);
+    printf("append %u MB:  %8.6f ms (%.2f MB/s)\n",
+           RW_MB,
+           (double)t_append / 1000.0,
+           (double)RW_MB / ((double)t_append / 1000000.0));
+    printf("read %u MB:    %8.6f ms (%.2f MB/s)\n",
+           RW_MB,
+           (double)t_read / 1000.0,
+           (double)RW_MB / ((double)t_read / 1000000.0));
+    printf("==================\n");
+
     return 0;
 }

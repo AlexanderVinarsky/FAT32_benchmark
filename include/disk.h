@@ -1,6 +1,6 @@
 #ifndef DISK_H_
 #define DISK_H_
-
+#define _POSIX_C_SOURCE 200809L
 #include <unistd.h>
 #include <fcntl.h>
 #include <errno.h>

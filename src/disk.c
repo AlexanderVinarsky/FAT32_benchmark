@@ -4,34 +4,34 @@ static int  g_fd = -1;
 static char g_img_path[1024] = "disk.img";
 
 static int _host_set_image(const char* path) {
-    if (!path || !path[0]) return -1;
+    if (!path || !path[0]) return 0;
     snprintf(g_img_path, sizeof(g_img_path), "%s", path);
-
     if (g_fd >= 0) {
         close(g_fd);
         g_fd = -1;
     }
-    return 0;
+
+    return 1;
 }
 
-static int ensure_open(void) {
-    if (g_fd >= 0) return 0;
+static int ensure_open() {
+    if (g_fd >= 0) return 1;
 
     int flags = O_RDWR;
 #ifdef O_CLOEXEC
     flags |= O_CLOEXEC;
 #endif
-
     g_fd = open(g_img_path, flags);
     if (g_fd < 0) {
         fprintf(stderr, "[DSK] open('%s') failed: %s\n", g_img_path, strerror(errno));
-        return -1;
+        return 0;
     }
-    return 0;
+
+    return 1;
 }
 
 int DSK_host_open(const char* image_path) {
-    if (_host_set_image(image_path) != 0) return -1;
+    if (!_host_set_image(image_path)) return 0;
     return ensure_open();
 }
 
@@ -75,7 +75,7 @@ static int full_pwrite(const void* buf, size_t n, off_t off) {
 
 int DSK_read_sectors_into(unsigned int lba, unsigned int count, unsigned char* out) {
     if (!out) return 0;
-    if (ensure_open() != 0) return 0;
+    if (!ensure_open()) return 0;
 
     size_t bytes = (size_t)count * SECTOR_SIZE;
     off_t off = (off_t)((uint64_t)lba * (uint64_t)SECTOR_SIZE);
@@ -85,7 +85,7 @@ int DSK_read_sectors_into(unsigned int lba, unsigned int count, unsigned char* o
 
 int DSK_readoff_sectors_into(unsigned int lba, unsigned int offset, unsigned int count, unsigned char* out) {
     if (!out) return 0;
-    if (ensure_open() != 0) return 0;
+    if (!ensure_open()) return 0;
 
     size_t bytes = (size_t)count * SECTOR_SIZE;
     off_t off = (off_t)((uint64_t)lba * (uint64_t)SECTOR_SIZE + (uint64_t)offset);
@@ -102,11 +102,11 @@ unsigned char* DSK_read_sectors(unsigned int lba, unsigned int count) {
     size_t bytes = (size_t)count * SECTOR_SIZE;
     unsigned char* buf = (unsigned char*)malloc(bytes);
     if (!buf) return NULL;
-
     if (!DSK_read_sectors_into(lba, count, buf)) {
         free(buf);
         return NULL;
     }
+
     return buf;
 }
 
@@ -129,7 +129,7 @@ unsigned char* DSK_readoff_sectors_stop(unsigned int lba, unsigned int offset, u
 
 int DSK_write_sectors(unsigned int lba, const unsigned char* data, unsigned int count) {
     if (!data) return 0;
-    if (ensure_open() != 0) return 0;
+    if (!ensure_open()) return 0;
 
     size_t bytes = (size_t)count * SECTOR_SIZE;
     off_t off = (off_t)((uint64_t)lba * (uint64_t)SECTOR_SIZE);
@@ -139,7 +139,7 @@ int DSK_write_sectors(unsigned int lba, const unsigned char* data, unsigned int 
 
 int DSK_writeoff_sectors(unsigned int lba, const unsigned char* data, unsigned int count, unsigned int offset, unsigned int size) {
     if (!data) return 0;
-    if (ensure_open() != 0) return 0;
+    if (!ensure_open()) return 0;
 
     uint64_t window = (uint64_t)count * (uint64_t)SECTOR_SIZE;
     if ((uint64_t)offset > window) return 0;

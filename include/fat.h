@@ -69,6 +69,7 @@
 #define CONCAT_ENTRY_HL_BITS(high, low, fat_type) ((high << (fat_type / 2)) | low)
 
 #define CONTENT_TABLE_SIZE	50
+#define PATH_DELIMITER      '/'
 
 /* Bpb taken from http://wiki.osdev.org/FAT */
 
@@ -201,5 +202,8 @@ Content* FAT_create_content();
 int FAT_unload_content_system(Content* content);
 Directory* _create_directory();
 File* _create_file();
+
+int fat_cache_init();
+void fat_cache_free_all();
 
 #endif
