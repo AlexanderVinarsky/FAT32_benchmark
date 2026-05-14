@@ -1,0 +1,357 @@
+#include <nft32/entry.h>
+
+static int _validate_entry(directory_entry_t* entry) {
+#ifndef NO_ENTRY_VALIDATION
+    checksum_t entry_checksum = entry->checksum;
+    entry->checksum = 0;
+    if (nft32_murmur3_x86_32((buffer_t)entry, sizeof(directory_entry_t), 0) == entry_checksum) entry->checksum = entry_checksum;
+    else {
+        print_error("Entry validation error! Checksums aren't the same!");
+        return 0;
+    }
+#endif
+    return 1;
+}
+
+static int _read_encoded_cluster(
+    cluster_addr_t ca, buffer_t __restrict enc, int enc_size, buffer_t __restrict dec, int dec_size, fat_data_t* __restrict fi
+) {
+    print_debug("_read_encoded_cluster(ca=%u)", ca);
+    if (!enc || !dec || is_cluster_bad(ca)) {
+        print_error("read_cluster() encountered an error. ecn == NULL, dec == NULL or ca is bad! Aborting...");
+        errors_register_error(BAD_CLUSTER_ERROR, fi);
+        return 0;
+    }
+
+    if (!read_cluster(ca, enc, enc_size, fi)) {
+        print_error("read_cluster() encountered an error. Aborting...");
+        errors_register_error(READ_CLUSTER_ERROR, fi);
+        return 0;
+    }
+
+    nft32_unpack_memory((const encoded_t*)enc, dec, dec_size);
+    return 1;
+}
+
+int entry_iterate(
+    cluster_addr_t ca, int (*handler)(entry_info_t*, directory_entry_t*, void*), void* ctx, fat_data_t* __restrict fi
+) {
+    print_debug("entry_iterate(cluster=%u)", ca);
+    int decoded_len = fi->cluster_size / sizeof(encoded_t);
+    if (decoded_len < 0) {
+        print_error("decoded_len (%i) is lower than 0!", decoded_len);
+        return 0;
+    }
+
+    int exit = 0;
+    stack_buffer_t cluster_data[fi->cluster_size], decoded_cluster[decoded_len];
+    unsigned int entries_per_cluster = (fi->cluster_size / sizeof(encoded_t)) / sizeof(directory_entry_t);
+    do {
+        if (!_read_encoded_cluster(ca, (buffer_t)&cluster_data, fi->cluster_size, (buffer_t)&decoded_cluster, decoded_len, fi)) {
+            break;
+        }
+        
+        directory_entry_t* entry = (directory_entry_t*)&decoded_cluster;
+        for (unsigned int i = 0; i < entries_per_cluster && !exit; i++, entry++) {
+            if (entry->file_name[0] == ENTRY_END) break;
+            entry_info_t info = { .ca = ca, .offset = i };
+            exit = handler(&info, entry, ctx);
+        }
+
+        nft32_pack_memory((buffer_t)&decoded_cluster, (encoded_t*)&cluster_data, decoded_len);
+        if (!write_cluster(ca, (buffer_t)&cluster_data, fi->cluster_size, fi)) {
+            print_error("Error correction of directory entry failed. Aborting...");
+            errors_register_error(ERROR_CORRECTION_ERROR, fi);
+            break;
+        }
+    } while (!is_cluster_end((ca = read_fat(ca, fi))) && !exit);
+    return exit;
+}
+
+static int _index_handler(entry_info_t* info __attribute__((unused)), directory_entry_t* __restrict entry, void* __restrict ctx) {
+    ecache_t** context = (ecache_t**)ctx;
+    if (!_validate_entry(entry) || entry->file_name[0] == ENTRY_FREE) {
+        return 0;
+    }
+
+    checksum_t entry_hash = nft32_murmur3_x86_32((const_buffer_t)entry->file_name, sizeof(entry->file_name), 0);
+    *context = ecache_insert(*context, entry_hash, (entry->attributes & FILE_DIRECTORY) != FILE_DIRECTORY, entry->dca);
+    return 0;
+}
+
+int entry_index(cluster_addr_t ca, ecache_t** __restrict cache, fat_data_t* __restrict fi) {
+    print_debug("entry_index(cluster=%u)", ca);
+    return entry_iterate(ca, _index_handler, (void*)cache, fi);
+}
+
+typedef struct {
+    const char*        name;
+    checksum_t         name_hash;
+    directory_entry_t* meta;
+    ecache_t*          index;
+    fat_data_t*        fi; // filesystem info
+    int                ji; // journal index
+} entry_ctx_t;
+
+static int _search_handler(entry_info_t* info, directory_entry_t* entry, void* ctx) {
+    entry_ctx_t* context = (entry_ctx_t*)ctx;
+    print_debug("ENTRY SEARCH: %.11s, ca=%u", context->name, info->ca);
+    if (!_validate_entry(entry) || entry->file_name[0] == ENTRY_FREE) return 0;
+    if (context->name_hash != entry->name_hash) return 0;
+    if (nft32_str_strncmp(context->name, (char*)entry->file_name, 11)) return 0;
+    if (context->meta) {
+        nft32_str_memcpy(context->meta, entry, sizeof(directory_entry_t));
+        context->meta->rca = info->ca;
+    }
+
+    return 1;
+}
+
+int entry_search(
+    const char* name, cluster_addr_t ca, ecache_t* __restrict cache, directory_entry_t* meta, fat_data_t* __restrict fi
+) {
+    print_debug("entry_search(name=%s, ca=%u, cache=%s)", name, ca, cache != NO_ECACHE ? "YES" : "NO");
+    if (cache != NO_ECACHE) {
+        checksum_t entry_hash = nft32_murmur3_x86_32((const_buffer_t)name, 11, 0);
+        ecache_t* cached_entry = ecache_find(cache, entry_hash);
+        if (cached_entry) {
+            if (meta) create_entry(name, IS_ECACHE_DIR(cached_entry), cached_entry->ca, 0, meta);
+            return 1;
+        }
+    }
+
+    entry_ctx_t ctx = { .meta = meta, .name = name, .name_hash = nft32_murmur3_x86_32((const_buffer_t)name, 11, 0) };
+    if (entry_iterate(ca, _search_handler, (void*)&ctx, fi)) {
+        print_debug("Entry=%.11s found! dca=%u, rca=%u", meta->file_name, meta->dca, meta->rca);
+        return 1;
+    }
+
+    return 0;
+}
+
+#ifndef NIFAT32_RO
+static int _edit_handler(entry_info_t* info, directory_entry_t* entry, void* ctx) {
+    entry_ctx_t* context = (entry_ctx_t*)ctx;
+    if (!_validate_entry(entry) || entry->file_name[0] == ENTRY_FREE) return 0;
+    if (context->name_hash != entry->name_hash) return 0;
+    if (nft32_str_strncmp((char*)entry->file_name, context->name, 11)) return 0;
+
+    context->ji = journal_add_operation(EDIT_OP, info->ca, info->offset, (unsqueezed_entry_t*)context->meta, context->fi);
+    if (context->index != NO_ECACHE) {
+        checksum_t src, dst;
+        src = nft32_murmur3_x86_32((const_buffer_t)context->name, 11, 0);
+        ecache_delete(context->index, src);
+        dst = nft32_murmur3_x86_32((const_buffer_t)entry->file_name, sizeof(entry->file_name), 0);
+        ecache_insert(context->index, dst, (entry->attributes & FILE_DIRECTORY) != FILE_DIRECTORY, entry->dca);
+    }
+
+    nft32_str_memcpy(entry, context->meta, sizeof(directory_entry_t));
+    return 1;
+}
+#endif
+
+int entry_edit(
+    cluster_addr_t ca, ecache_t* __restrict cache, const char* name, const directory_entry_t* meta, fat_data_t* __restrict fi
+) {
+#ifndef NIFAT32_RO
+    print_debug("entry_edit(cluster=%u, name=%.11s, cache=%s)", ca, name, cache != NO_ECACHE ? "YES" : "NO");
+    entry_ctx_t context = { 
+        .meta      = (directory_entry_t*)meta, 
+        .name      = name, 
+        .name_hash = nft32_murmur3_x86_32((const_buffer_t)name, 11, 0), 
+        .index     = cache, .fi = fi, .ji = -1
+    };
+
+    int result = entry_iterate(ca, _edit_handler, (void*)&context, fi);
+    if (context.ji >= 0) journal_solve_operation(context.ji, fi);
+    return result;
+#endif
+    UNUSED(ca, cache, name, meta, fi);
+    print_warn("entry_edit() is not implemented! Don't provide the 'NIFAT32_RO'!");
+    return 1;
+}
+
+int entry_add(cluster_addr_t ca, ecache_t* __restrict cache, directory_entry_t* __restrict meta, fat_data_t* __restrict fi) {
+#ifndef NIFAT32_RO
+    print_debug("entry_add(ca=%u, name=%.11s, dca=%u, rca=%u, cache=%s)", ca, meta->file_name, meta->dca, meta->rca, cache != NO_ECACHE ? "YES" : "NO");
+    int decoded_len = fi->cluster_size / sizeof(encoded_t);
+    if (decoded_len < 0) {
+        print_error("decoded_len (%i) is lower than 0!", decoded_len);
+        return 0;
+    }
+
+    stack_buffer_t cluster_data[fi->cluster_size], decoded_cluster[decoded_len];    
+    unsigned int entries_per_cluster = (fi->cluster_size / sizeof(encoded_t)) / sizeof(directory_entry_t);
+    do {
+        if (!_read_encoded_cluster(ca, (buffer_t)&cluster_data, fi->cluster_size, (buffer_t)&decoded_cluster, decoded_len, fi)) {
+            break;
+        }
+    
+        directory_entry_t* entry = (directory_entry_t*)&decoded_cluster;
+        for (unsigned int i = 0; i < entries_per_cluster; i++, entry++) {
+            if (
+                !_validate_entry(entry) || 
+                entry->file_name[0] == ENTRY_FREE || 
+                entry->file_name[0] == ENTRY_END
+            ) {
+                int ji = journal_add_operation(ADD_OP, ca, i, (unsqueezed_entry_t*)meta, fi);
+
+                meta->rca = ca;
+                meta->checksum = nft32_murmur3_x86_32((const_buffer_t)meta, sizeof(directory_entry_t), 0);
+
+                nft32_str_memcpy(entry, meta, sizeof(directory_entry_t));
+                if (i + 1 < entries_per_cluster) (entry + 1)->file_name[0] = ENTRY_END;
+                if (cache != NO_ECACHE) {
+                    checksum_t entry_hash = nft32_murmur3_x86_32((const_buffer_t)meta->file_name, sizeof(meta->file_name), 0);
+                    ecache_insert(cache, entry_hash, (entry->attributes & FILE_DIRECTORY) != FILE_DIRECTORY, meta->dca);
+                }
+
+                nft32_pack_memory((buffer_t)&decoded_cluster, (encoded_t*)&cluster_data, decoded_len);
+                if (!write_cluster(ca, (buffer_t)&cluster_data, fi->cluster_size, fi)) {
+                    print_error("Writing new directory entry failed. Aborting...");
+                    errors_register_error(ENTRY_ADD_ERROR, fi);
+                    return -6;
+                }
+
+                journal_solve_operation(ji, fi);
+                return 1;
+            }
+        }
+
+        cluster_addr_t nca = read_fat(ca, fi);
+        if (is_cluster_bad(nca)) {
+             print_error("<BAD> cluster in the chain. Aborting...");
+             errors_register_error(BAD_CLUSTER_IN_CHAIN_ERROR, fi);
+            break;
+        }
+
+        if (is_cluster_end(nca)) {
+            if (is_cluster_bad((nca = alloc_cluster(fi)))) {
+                print_error("Allocation of new cluster failed. Aborting...");
+                errors_register_error(CLUSTER_ALLOCATION_ERROR, fi);
+                break;
+            }
+
+            if (!set_cluster_end(nca, fi)) {
+                print_error("Can't set new cluster as <END>. Aborting...");
+                errors_register_error(ALLOCATED_CLUSTER_BAD_ERROR, fi);
+                break;
+            }
+
+            if (!write_fat(ca, nca, fi)) {
+                print_error("Extension of the cluster chain with new cluster failed. Aborting...");
+                errors_register_error(CLUSTER_CHAIN_APPEND_ERROR, fi);
+                break;
+            }
+        }
+
+        ca = nca;
+    } while (!is_cluster_end(ca));
+    return -1;
+#endif
+    UNUSED(ca, meta, cache, fi);
+    print_warn("entry_add() is not implemented! Don't provide the 'NIFAT32_RO'!");
+    return 1;
+}
+
+#ifndef NIFAT32_RO
+static int _entry_erase_rec(cluster_addr_t ca, int file, fat_data_t* fi) {
+    print_debug("_entry_erase_rec(cluster=%u, file=%i)", ca, file);
+    if (file) return dealloc_chain(ca, fi);
+    else {
+        int decoded_len = fi->cluster_size / sizeof(encoded_t);
+        if (fi->cluster_size || decoded_len < 0) {
+            print_error("decoded_len (%i) is lower than 0!", decoded_len);
+            return 0;
+        }
+
+        cluster_addr_t nca = ca;
+        stack_buffer_t cluster_data[fi->cluster_size], decoded_cluster[decoded_len];   
+        unsigned int entries_per_cluster = (fi->cluster_size / sizeof(encoded_t)) / sizeof(directory_entry_t);
+        do {
+            if (!_read_encoded_cluster(ca, (buffer_t)&cluster_data, fi->cluster_size, (buffer_t)&decoded_cluster, decoded_len, fi)) {
+                break;
+            }
+            
+            nca = read_fat(ca, fi);
+            directory_entry_t* entry = (directory_entry_t*)&decoded_cluster;
+            for (unsigned int i = 0; i < entries_per_cluster; i++, entry++) {
+                if (entry->file_name[0] == ENTRY_END) break;
+                if (_validate_entry(entry) && entry->file_name[0] != ENTRY_FREE) {
+                    if (_entry_erase_rec(entry->dca, (entry->attributes & FILE_DIRECTORY) != FILE_DIRECTORY, fi) < 0) {
+                        print_warn("Recursive erase error!");
+                        errors_register_error(RECURSIVE_ERASE_ERROR, fi);
+                    }
+                }
+            }
+
+            if (!dealloc_cluster(ca, fi)) {
+                print_warn("dealloc_cluster() encountered an error.");
+                errors_register_error(CLUSTER_DEALLOCATION_ERROR, fi);
+            }
+
+            ca = nca;
+        } while (!is_cluster_end(ca));
+        return 1;
+    }
+
+    return -2;
+}
+
+static int _remove_handler(entry_info_t* __restrict info, directory_entry_t* __restrict entry, void* __restrict ctx) {
+    entry_ctx_t* context = (entry_ctx_t*)ctx;
+    if (!_validate_entry(entry) || entry->file_name[0] == ENTRY_FREE) return 0;
+    if (nft32_str_strncmp((char*)entry->file_name, context->name, 11)) return 0;
+
+    if (context->index != NO_ECACHE) {
+        checksum_t src;
+        src = nft32_murmur3_x86_32((const_buffer_t)context->name, 11, 0);
+        ecache_delete(context->index, src);
+    }
+
+    context->ji = journal_add_operation(DEL_OP, info->ca, info->offset, (unsqueezed_entry_t*)entry, context->fi);
+    if (_entry_erase_rec(entry->dca, (entry->attributes & FILE_DIRECTORY) != FILE_DIRECTORY, context->fi) < 0) {
+        print_error("Cluster chain delete failed. Aborting...");
+        errors_register_error(CLUSTER_CHAIN_DELETION_ERROR, context->fi);
+        return 1;
+    }
+
+    entry->file_name[0] = ENTRY_FREE;
+    return 1;
+}
+#endif
+
+int entry_remove(cluster_addr_t ca, const char* name, ecache_t* __restrict cache, fat_data_t* __restrict fi) {
+#ifndef NIFAT32_RO
+    print_debug("entry_remove(cluster=%u, name=%.11s, cache=%s)", ca, name, cache != NO_ECACHE ? "YES" : "NO");
+    entry_ctx_t context = { .name = name, .fi = fi, .index = cache, .ji = -1 };
+    int result = entry_iterate(ca, _remove_handler, (void*)&context, fi);
+    if (context.ji >= 0) journal_solve_operation(context.ji, fi);
+    return result;
+#endif
+    UNUSED(ca, name, cache, fi);
+    print_warn("entry_remove() is not implemented! Don't provide the 'NIFAT32_RO'!");
+    return 1;
+}
+
+int create_entry(
+    const char* fullname, char is_dir, cluster_addr_t first_cluster, unsigned int file_size, directory_entry_t* entry
+) {
+    entry->checksum = 0;
+    entry->rca = FAT_CLUSTER_BAD;
+    entry->dca = first_cluster;
+
+    if (is_dir) {
+        entry->file_size  = 1;
+        entry->attributes = FILE_DIRECTORY;
+    }
+    else {
+        entry->file_size  = file_size;
+        entry->attributes = FILE_ARCHIVE;
+    }
+
+    nft32_str_memcpy(entry->file_name, fullname, 11);
+    entry->name_hash = nft32_murmur3_x86_32((const_buffer_t)entry->file_name, sizeof(entry->file_name), 0);
+    print_debug("_create_entry=%.11s, is_dir=%i, fca=%u", entry->file_name, is_dir, first_cluster);
+    return 1; 
+}

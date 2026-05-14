@@ -1,0 +1,353 @@
+/*
+License:
+    MIT License. See LICENSE file in project root.
+    Copyright (c) 2025 Nikolay
+
+Description:
+    Public NIFAT32 API, mount parameters, and boot sector structures.
+
+Dependencies:
+    - std/mm.h - Filesystem memory manager.
+    - std/str.h - String and memory helpers.
+    - std/null.h - NULL definition.
+    - std/hamming.h - Encoded data helpers.
+    - std/logging.h - Logging helpers.
+    - std/fatname.h - FAT 8.3 name conversion.
+    - std/errcodes.h - Error code enumeration.
+    - std/checksum.h - Checksum type.
+    - std/threading.h - Lock primitives.
+    - nft32/fat.h - FAT operations.
+    - nft32/disk.h - Sector I/O primitives.
+    - nft32/entry.h - Directory entry operations.
+    - nft32/ecache.h - Entry cache structures.
+    - nft32/ctable.h - Content table operations.
+    - nft32/errors.h - Error registration.
+    - nft32/cluster.h - Cluster I/O utilities.
+    - nft32/fatinfo.h - FAT filesystem metadata.
+*/
+
+#ifndef NIFAT32_H_
+#define NIFAT32_H_
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+#include <std/mm.h>
+#include <std/str.h>
+#include <std/null.h>
+#include <std/hamming.h>
+#include <std/logging.h>
+#include <std/fatname.h>
+#include <std/errcodes.h>
+#include <std/checksum.h>
+#include <std/threading.h>
+#include <nft32/fat.h>
+#include <nft32/disk.h>
+#include <nft32/entry.h>
+#include <nft32/ecache.h>
+#include <nft32/ctable.h>
+#include <nft32/errors.h>
+#include <nft32/cluster.h>
+#include <nft32/fatinfo.h>
+
+/* Bpb taken from http://wiki.osdev.org/FAT */
+typedef struct fat_extBS_32 {
+    unsigned int   table_size_32;
+    unsigned short extended_flags;
+    unsigned short fat_version;
+    unsigned int   root_cluster;
+    unsigned char  drive_number;
+    unsigned char  boot_signature;
+    unsigned int   volume_id;
+    unsigned char  volume_label[11];
+    unsigned char  fat_type_label[8];
+    checksum_t     checksum;
+} __attribute__((packed)) nifat32_ext32_bootsector_t;
+
+typedef struct fat_BS {
+    unsigned char              bootjmp[3];
+    unsigned char              oem_name[8];
+    unsigned short             bytes_per_sector;
+    unsigned char              sectors_per_cluster;
+    unsigned short             reserved_sector_count;
+    unsigned char              table_count;
+    unsigned short             root_entry_count;
+    unsigned short             total_sectors_16;
+    unsigned char              media_type;
+    unsigned short             table_size_16;
+    unsigned short             sectors_per_track;
+    unsigned short             head_side_count;
+    unsigned int               hidden_sector_count;
+    unsigned int               total_sectors_32;
+    nifat32_ext32_bootsector_t extended_section;
+    checksum_t                 checksum;
+} __attribute__((packed)) nifat32_bootsector_t;
+
+#define NO_CACHE   0b00000000
+#define CACHE      0b00000001
+#define HARD_CACHE 0b00000010
+#define MAP_CACHE  0b00000100
+typedef struct {
+    char          fat_cache : 3;
+    unsigned char bs_num;   // bootsectors number
+    unsigned char bs_count; // bootsector count
+    unsigned int  ts;       // total sectors
+    unsigned char jc;       // journals count
+    unsigned char ec;       // error clusters count
+    disk_io_t     disk_io;
+    log_io_t      logg_io;
+    mm_manager_t  mm_manager;
+} nifat32_params_t;
+
+#define BOOT_MULTIPLIER 2654435761U // Knuth's multiplier (2^32 / φ)
+#define GET_BOOTSECTOR(n, ts) (((((n) + 1) * BOOT_MULTIPLIER) >> 11) % (ts - 2))
+
+#ifdef NO_HEAP
+    #define NIFAT32_NO_ECACHE
+    #define NO_FAT_CACHE
+    #define NO_FAT_MAP
+#endif
+
+/*
+Load general information.
+Params:
+    - `d` - Output data destination.
+
+Returns 1 if succeeds.
+*/
+int NIFAT32_get_fs_data(fat_data_t* d);
+
+/*
+Init function. 
+Note: This function also init memory manager.
+Note 2: For noise-immunity purpuses for initialization of NIFAT32 we
+should know end count of sectors.
+Params:
+- `params` - NIFAT32 setup params.
+
+Return 1 if init success.
+Return 0 if init was interrupted by error.
+*/
+int NIFAT32_init(nifat32_params_t* params);
+
+/*
+Restore bootsectors on mount image.
+Note: Will create a new bootsector from current info from RAM. 
+Note 2: This function will rewrite all existed copies on image.
+Return 1.
+*/
+int NIFAT32_repair_bootsectors();
+
+/*
+Unload sequence. Perform all cleanup tasks.
+Return 1.
+*/
+int NIFAT32_unload();
+
+/*
+Checks if a content by the provided path exists.
+Return 1 if content exists.
+Return 0 if content not exists.
+*/
+int NIFAT32_content_exists(const char* path);
+
+/* Open mode flags */
+#define R_MODE  0b0001 // Read mode
+#define W_MODE  0b0010 // Write mode
+#define CR_MODE 0b0100 // Create mode
+
+/* Create target flags */
+#define NO_TARGET   0b0000
+#define FILE_TARGET 0b0001
+#define DIR_TARGET  0b0010
+
+/* Pack mode */
+#define MODE(mode, target) (((target & 0b1111) << 4) | (mode & 0b1111))
+
+/* Default mode (RW) */
+#define DF_MODE MODE((R_MODE | W_MODE), NO_TARGET)
+
+/* Unpack macro */
+#define GET_MODE(byte)        ((byte) & 0b1111)
+#define GET_MODE_TARGET(byte) (((byte) >> 4) & 0b1111)
+#define IS_READ_MODE(byte)    (GET_MODE(byte) & R_MODE)
+#define IS_WRITE_MODE(byte)   (GET_MODE(byte) & W_MODE)
+#define IS_CREATE_MODE(byte)  (GET_MODE(byte) & CR_MODE)
+
+#define NO_RCI -1
+/*
+Open content to content table.
+Params:
+- `rci` - Root content index. If we don't want to search in entire file system.
+          Note: By default use NO_RCI
+- `path` - Path to content (dir or file).
+           Note: Can be NULL. In this case will open ROOT directory.
+- `mode` - Content open mode.
+           Note: If mode is CR_MODE, function will create all directories in path.
+           For last entry in path will use DIR_ or FILE_ MODE. 
+
+Returns a content index or negative error code.
+*/
+ci_t NIFAT32_open_content(const ci_t rci, const char* path, unsigned char mode);
+
+/*
+Get summary info about content.
+Params:
+- `ci` - Content index.
+- `info` - Pointer to info struct that will be filled by info.
+
+Returns 1 if stat was success.
+Returns 0 if something went wrong.
+*/
+int NIFAT32_stat_content(const ci_t ci, cinfo_t* info);
+
+/*
+Change meta data of content.
+Note: This function will change creation date, file and extention.
+Note 2: This function can't change filesize and base cluster.
+Params:
+- `ci` - Targer content index.
+- `info` - New meta data.
+         Note: required fields is file_name, file_extension and type.
+
+Returns 1 if change was success.
+Returns 0 if something went wrong.
+*/
+int NIFAT32_change_meta(const ci_t ci, const cinfo_t* info);
+
+/*
+Read data from content to buffer. 
+Note: This function don't check buffer and it's address.
+Note 2: If offset larger then content size, function will return buff_size.
+Note 3: If ci is ci of directory, will return raw directory info. For working with this info
+use directory_entry_t.
+Params:
+- `ci` - Target content index.
+- `offset` - Offset in content.
+- `buffer` - Pointer where function should store data.
+- `buff_size` - Buffer size.
+
+Returns the count of bytes that were read by the function.
+*/
+int NIFAT32_read_content2buffer(const ci_t ci, cluster_offset_t offset, buffer_t buffer, int buff_size);
+
+/*
+Write data from buffer to content. 
+Note: This function don't check buffer and it's address.
+Note 2: If offset larger then content size, function will return data_size.
+Params:
+- `ci` - Target content index.
+- `offset` - Offset in content.
+- `data` - Pointer to source data.
+- `data_size` - Data size.
+
+Returns a count of bytes that were written by the function.
+*/
+int NIFAT32_write_buffer2content(const ci_t ci, cluster_offset_t offset, const_buffer_t data, int data_size);
+
+/*
+Trancate content will change occupied size of content.
+Note: Will save data in result clusters.
+Params:
+- `ci` - Target content index.
+- `offset` - Trancate offset in bytes.
+- `size` - Result size of file in bytes.
+
+Returns 1 if operation succeed.
+Returns 0 if simething went wrong.
+*/
+int NIFAT32_truncate_content(const ci_t ci, cluster_offset_t offset, int size);
+
+/*
+Index content directory for improving search speed.
+- `ci` - Content index.
+
+Return 1 if index was success.
+Return 0 if something went wrong.
+*/
+int NIFAT32_index_content(const ci_t ci);
+
+/*
+Close content from table and release all resources.
+Params:
+- `ci` - Content index.
+
+Return 1 if close was success.
+Return 0 if something went wrong.
+*/
+int NIFAT32_close_content(ci_t ci);
+
+#define NO_RESERVE  1
+/*
+Add content to target content index. 
+Params:
+- `ci` - Root content index. Should be directory. 
+         Note: Can't be the `NO_RCI`. Use the open function with the NO_RCI 
+               to get this value instead.
+- `info` - Pointer to info about new content.
+- `reserve` - Reserved cluster count for content. 
+              Note: This option can be `NO_RESERVE`.
+              Note 2: Will reserve cluster chain for defragmentation prevent.
+
+Returns 1 if operation was success.
+Returns 0 if something went wrong.
+*/
+int NIFAT32_put_content(const ci_t ci, cinfo_t* info, int reserve);
+
+#define DEEP_COPY    0x01
+#define SHALLOW_COPY 0x02
+/*
+Copy content data to destination place.
+Note: deep parametr can set copy type: 
+- `DEEP_COPY` copy all data from the source with new cluster creation in destination.
+- `SHALLOW_COPY` create a link from the dst to the src.
+Note 1: Shallow copy won't create a new name, which means you *must* ensure, that the
+        shallow copy placed somewhere not in the same directory with the source.
+Note 2: NIFAT32_copy_content will deallocate all previous data in dst.
+Params:
+- `src` - Source content index.
+- `dst` - Destination content index.
+- `deep` - Copy type.
+
+Returns 1 if copy succeed.
+Returns 0 if something went wrong.
+*/
+int NIFAT32_copy_content(const ci_t src, const ci_t dst, char deep);
+
+/*
+Delete content by content index.
+Note: This function will close this content.
+Params:
+- `ci` - Content index.
+
+Return 1 if delete success.
+Return 0 if something goes wrong.
+*/
+int NIFAT32_delete_content(ci_t ci);
+
+/*
+Repair content by reading, unpacking (error correcting) and writing to disk.
+Note: Will read, correct and write all directry entries in content.
+Note 2: This function will ignore file entries.
+Params:
+- `ci` - Content index.
+- `rec` - Recursive.
+
+Return 1 if repair success.
+Return 0 if something goes wrong.
+*/
+int NIFAT32_repair_content(const ci_t ci, int rec);
+
+/*
+Get last registered error. Error registration based on ring buffer with maxim unhandled errors
+count equals CLUSTER_SIZE / sizeof(unsigned int)
+
+Returns -1 if there is no registered errors.
+Returns error code of last occured error.
+*/
+error_code_t NIFAT32_get_last_error();
+
+#ifdef __cplusplus
+}
+#endif
+#endif
