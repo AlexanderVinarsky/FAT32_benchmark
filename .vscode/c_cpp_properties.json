@@ -486,6 +486,7 @@
                 "ALLOC_BUFFER_SIZE=32768",
                 "CONTENT_TABLE_SIZE=8",
                 "IO_THREADS_MAX=4",
+                "ARDUINO_LOOP_STACK_SIZE=32768",
                 "HAVE_CONFIG_H",
                 "MBEDTLS_CONFIG_FILE=\"mbedtls/esp_config.h\"",
                 "UNITY_INCLUDE_CONFIG_H",
