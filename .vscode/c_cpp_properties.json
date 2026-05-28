@@ -9,6 +9,9 @@
             "name": "PlatformIO",
             "includePath": [
                 "/home/alexandervinarsky/Projects/Micro/NiFAT32-esp32/src",
+                "/home/alexandervinarsky/Projects/Micro/NiFAT32-esp32/.pio/libdeps/esp32dev/Adafruit INA219",
+                "/home/alexandervinarsky/Projects/Micro/NiFAT32-esp32/.pio/libdeps/esp32dev/Adafruit BusIO",
+                "/home/alexandervinarsky/.platformio/packages/framework-arduinoespressif32/libraries/Wire/src",
                 "/home/alexandervinarsky/Projects/Micro/NiFAT32-esp32/.pio/libdeps/esp32dev/SdFat/src",
                 "/home/alexandervinarsky/.platformio/packages/framework-arduinoespressif32/libraries/SPI/src",
                 "/home/alexandervinarsky/Projects/Micro/NiFAT32-esp32/include",
@@ -208,6 +211,9 @@
                 "/home/alexandervinarsky/.platformio/packages/framework-arduinoespressif32/tools/sdk/esp32/dio_qspi/include",
                 "/home/alexandervinarsky/.platformio/packages/framework-arduinoespressif32/cores/esp32",
                 "/home/alexandervinarsky/.platformio/packages/framework-arduinoespressif32/variants/esp32",
+                "/home/alexandervinarsky/Projects/Micro/NiFAT32-esp32/.pio/libdeps/esp32dev/Adafruit GFX Library",
+                "/home/alexandervinarsky/Projects/Micro/NiFAT32-esp32/.pio/libdeps/esp32dev/Adafruit NeoPixel",
+                "/home/alexandervinarsky/Projects/Micro/NiFAT32-esp32/.pio/libdeps/esp32dev/Adafruit SSD1306",
                 "/home/alexandervinarsky/.platformio/packages/framework-arduinoespressif32/libraries/ArduinoOTA/src",
                 "/home/alexandervinarsky/.platformio/packages/framework-arduinoespressif32/libraries/AsyncUDP/src",
                 "/home/alexandervinarsky/.platformio/packages/framework-arduinoespressif32/libraries/BLE/src",
@@ -239,13 +245,15 @@
                 "/home/alexandervinarsky/.platformio/packages/framework-arduinoespressif32/libraries/WiFi/src",
                 "/home/alexandervinarsky/.platformio/packages/framework-arduinoespressif32/libraries/WiFiClientSecure/src",
                 "/home/alexandervinarsky/.platformio/packages/framework-arduinoespressif32/libraries/WiFiProv/src",
-                "/home/alexandervinarsky/.platformio/packages/framework-arduinoespressif32/libraries/Wire/src",
                 ""
             ],
             "browse": {
                 "limitSymbolsToIncludedHeaders": true,
                 "path": [
                     "/home/alexandervinarsky/Projects/Micro/NiFAT32-esp32/src",
+                    "/home/alexandervinarsky/Projects/Micro/NiFAT32-esp32/.pio/libdeps/esp32dev/Adafruit INA219",
+                    "/home/alexandervinarsky/Projects/Micro/NiFAT32-esp32/.pio/libdeps/esp32dev/Adafruit BusIO",
+                    "/home/alexandervinarsky/.platformio/packages/framework-arduinoespressif32/libraries/Wire/src",
                     "/home/alexandervinarsky/Projects/Micro/NiFAT32-esp32/.pio/libdeps/esp32dev/SdFat/src",
                     "/home/alexandervinarsky/.platformio/packages/framework-arduinoespressif32/libraries/SPI/src",
                     "/home/alexandervinarsky/Projects/Micro/NiFAT32-esp32/include",
@@ -445,6 +453,9 @@
                     "/home/alexandervinarsky/.platformio/packages/framework-arduinoespressif32/tools/sdk/esp32/dio_qspi/include",
                     "/home/alexandervinarsky/.platformio/packages/framework-arduinoespressif32/cores/esp32",
                     "/home/alexandervinarsky/.platformio/packages/framework-arduinoespressif32/variants/esp32",
+                    "/home/alexandervinarsky/Projects/Micro/NiFAT32-esp32/.pio/libdeps/esp32dev/Adafruit GFX Library",
+                    "/home/alexandervinarsky/Projects/Micro/NiFAT32-esp32/.pio/libdeps/esp32dev/Adafruit NeoPixel",
+                    "/home/alexandervinarsky/Projects/Micro/NiFAT32-esp32/.pio/libdeps/esp32dev/Adafruit SSD1306",
                     "/home/alexandervinarsky/.platformio/packages/framework-arduinoespressif32/libraries/ArduinoOTA/src",
                     "/home/alexandervinarsky/.platformio/packages/framework-arduinoespressif32/libraries/AsyncUDP/src",
                     "/home/alexandervinarsky/.platformio/packages/framework-arduinoespressif32/libraries/BLE/src",
@@ -476,7 +487,6 @@
                     "/home/alexandervinarsky/.platformio/packages/framework-arduinoespressif32/libraries/WiFi/src",
                     "/home/alexandervinarsky/.platformio/packages/framework-arduinoespressif32/libraries/WiFiClientSecure/src",
                     "/home/alexandervinarsky/.platformio/packages/framework-arduinoespressif32/libraries/WiFiProv/src",
-                    "/home/alexandervinarsky/.platformio/packages/framework-arduinoespressif32/libraries/Wire/src",
                     ""
                 ]
             },
